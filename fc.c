@@ -14,8 +14,9 @@
 #include <dirent.h>
 #include <linux/limits.h>
 #include <ctype.h>
-//#include <pthread.h>
+#include <pthread.h>
 #include <stdint.h>
+#include <termios.h>
 
 #include "crc.h"
 #include "aes.h"
@@ -38,15 +39,19 @@ typedef struct header {
 	uint8_t sum[AES_BLOCKLEN]; // encrypted sum of fields above
 } header;
 
-static inline size_t min(size_t a, size_t b) {
-	return a < b ? a : b;
-}
+#define min(a, b) (a) < (b) ? (a) : (b)
 
 // ./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz
 // https://en.wikipedia.org/wiki/Crypt_(C)
 const char b64[] = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
 #define PASS_MAX 64
+
+typedef struct progress {
+	int first;
+	void (*progress)(struct progress *c, float p);
+	void (*done)(struct progress *c);
+} progress;
 
 typedef struct ctx {
 	FILE *f;
@@ -60,13 +65,14 @@ typedef struct ctx {
 	int buf_pos;
 	size_t buf_len;
 	char password[PASS_MAX];
-	void (*progress)(float progress);
+	progress progress;
+	size_t size;
 } ctx;
 
 // forward declaration
-static int rr64(char c);
+static int ri64(char c);
 static void r64(unsigned char *p, int pn, unsigned char* r, int rn);
-static void derive_key(unsigned char *p, int pn, unsigned char *k, int kn);
+static void rr64(unsigned char *p, int pn, unsigned char *k, int kn);
 static int read_from_ctx(ctx *c, char *b, size_t n);
 static int read_file(FILE *f, char *name, char *b, size_t n);
 static void encrypt_sum(header *h, ctx *ctx, uint8_t *sum);
@@ -82,6 +88,29 @@ static int _feof(ctx *c);
 static int next_block(ctx *c, char *b, int pad);
 static int do_filep(ctx *c, FILE *fp, char *file);
 
+
+// TODO:
+// 1. use thread pool for bulk work
+// 2. better progress info output
+//static int get_cur_pos(int *x, int *y) {
+//	*x = -1;
+//	*y = -1;
+//	struct termios term, restore;
+//
+//	tcgetattr(0, &term);
+//	tcgetattr(0, &restore);
+//	term.c_lflag &= ~(ICANON | ECHO);
+//	tcsetattr(0, TCSANOW, &term);
+//
+//	fwrite("\033[6n", 1, 4, stdout);
+//
+//	fscanf(stdin, "\033[%d;%dR", &y, &x);
+//
+//	tcsetattr(0, TCSANOW, &restore);
+//	return 0;
+//}
+
+
 static void r64(unsigned char *p, int pn, unsigned char* r, int rn) {
 	assert(pn / 3 * 4 == rn);
 	for (int i =0, j = 0; i < pn; i+=3, j+=4) {
@@ -92,7 +121,7 @@ static void r64(unsigned char *p, int pn, unsigned char* r, int rn) {
 	}
 
 }
-static int rr64(char c) {
+static int ri64(char c) {
 	switch (c) {
 	case '.':
 		return 0;
@@ -112,12 +141,12 @@ static int rr64(char c) {
 	exit(0xff);
 }
 
-static void derive_key(unsigned char *p, int pn, unsigned char *k, int kn) {
+static void rr64(unsigned char *p, int pn, unsigned char *k, int kn) {
 	assert(pn / 4 * 3 == kn);
 	for (int i = 0, j = 0; i < pn; i += 4, j += 3) {
-		k[j] = rr64(p[i]) << 2 | rr64(p[i+1]) >> 4;
-		k[j+1] = (rr64(p[i+1]) & 0xf) << 4 | rr64(p[i+2]) >> 2;
-		k[j+2] = (rr64(p[i+2]) & 3) << 6 | rr64(p[i+3]);
+		k[j] = ri64(p[i]) << 2 | ri64(p[i+1]) >> 4;
+		k[j+1] = (ri64(p[i+1]) & 0xf) << 4 | ri64(p[i+2]) >> 2;
+		k[j+2] = (ri64(p[i+2]) & 3) << 6 | ri64(p[i+3]);
 	}
 }
 
@@ -131,6 +160,7 @@ static void usage() {
 			"	-d decrypt\n"
 			"	in case of no option, perform decryption if the file was an encrypted file, otherwise encrypt\n"
 	);
+	exit(2);
 }
 
 static int read_from_ctx(ctx *c, char *b, size_t n) {
@@ -261,11 +291,17 @@ static void encrypt(ctx *c) {
 
 	_write((char *)&h, sizeof(h), fout, name);
 	int n = 0;
+	float progress = 0;
 	while ((r = next_block(c, b, 1) > 0)) {
 		AES_CBC_encrypt_buffer(c->ctx, (uint8_t *)b, r);
 		_write(b, AES_BLOCKLEN, fout, name);
 		n+=AES_BLOCKLEN;
+		progress = n / (float)c->size;
+		if (c->progress.progress) {
+			c->progress.progress(&c->progress, progress);
+		}
 	}
+
 	if (r == -1) {
 		// error
 		fprintf(stderr, "errir reading file: %s\n", c->name);
@@ -278,6 +314,10 @@ static void encrypt(ctx *c) {
 	// write header again with size and sum
 	_write((char *)&h, sizeof(h), fout, name);
 	fclose(fout);
+
+	if (c->progress.done) {
+		c->progress.done(&c->progress);
+	}
 	if (namealloc) {
 		free(name);
 	}
@@ -315,7 +355,7 @@ static void init_AESctx(ctx *c) {
 
 	char *a = h + 20;
 	char key[18]; // only 16 bytes needed, next multiple of 3 is 18
-	derive_key((unsigned char *)a, 24, (unsigned char *)key, sizeof(key));
+	rr64((unsigned char *)a, 24, (unsigned char *)key, sizeof(key));
 	memcpy(c->key, key, sizeof(c->key));
 	struct AES_ctx *ctx = malloc(sizeof(*ctx));
 	if (!ctx) {
@@ -377,6 +417,7 @@ static void decrypt(ctx *c) {
 	int r;
 	char last[AES_BLOCKLEN];
 	int first = 1;
+	size_t l = 0;
 	while ((r = next_block(c, b, 0) > 0)) {
 		AES_CBC_decrypt_buffer(c->ctx, (uint8_t*) b, r);
 		if (first) {
@@ -385,6 +426,10 @@ static void decrypt(ctx *c) {
 			_write(last, AES_BLOCKLEN, fout, name);
 		}
 		memcpy(last, b, sizeof(b));
+		l += AES_BLOCKLEN;
+		if (c->progress.progress) {
+			c->progress.progress(&c->progress, l / (float)c->size);
+		}
 	}
 	if (r == -1) {
 		// error
@@ -395,7 +440,12 @@ static void decrypt(ctx *c) {
 	if (last[sizeof(last) - 1] < AES_BLOCKLEN) {
 		_write(last, AES_BLOCKLEN - last[sizeof(last) - 1], fout, name);
 	} // else whole block was padding
+
+
 	fclose(fout);
+	if (c->progress.done) {
+		c->progress.done(&c->progress);
+	}
 	if (namealloc) {
 		free(name);
 	}
@@ -453,7 +503,7 @@ int main(int argc, char **argv) {
 		switch (c) {
 		case 'h':
 			usage();
-			exit(0);
+			break;
 		case 'e': // encrypt
 			ctx.enc = 1;
 			break;
@@ -506,12 +556,49 @@ int main(int argc, char **argv) {
 	}
 }
 
+static void progress_out(progress *prog, float p) {
+	if (p > 1) {
+		p = 1;
+	}
+	char b[4];
+	sprintf(b, "%d", (int)(p * 100));
+	if (prog->first) {
+		prog->first = 0;
+		ctx *c = (ctx *)((uint64_t)(prog) - offsetof(ctx, progress));
+		fprintf(stdout, "%s: %3.3s%%", c->name, b);
+		fflush(stdout);
+	} else {
+		fprintf(stdout, "\b\b\b\b%3.3s%%", b);
+		fflush(stdout);
+	}
+}
+
+static void progress_done(progress *prog) {
+	fprintf(stdout, "\n");
+}
+
 static int do_filep(ctx *c, FILE *fp, char *file) {
 	// new context for each file
 	ctx cn;
 	memcpy(&cn, c, sizeof(cn));
 	cn.f = fp;
 	cn.name = file;
+
+	// set size
+	int fd = fileno(fp);
+	if (fd == -1) {
+		fprintf(stderr, "error fileno\n");
+		exit(EXIT_FAILURE);
+	}
+	struct stat st;
+	if (fstat(fd, &st) == -1) {
+		fprintf(stderr, "error stat file\n");
+		exit(EXIT_FAILURE);
+	}
+	cn.size = st.st_size;
+	cn.progress.first = 1;
+	cn.progress.progress = progress_out;
+	cn.progress.done = progress_done;
 	fcrypt(&cn);
 	return 0;
 }
