@@ -17,59 +17,22 @@
 #include <pthread.h>
 #include <stdint.h>
 #include <termios.h>
+#include <linux/futex.h>
+#include <sys/time.h>
 
 #include "crc.h"
 #include "aes.h"
+#include "work.h"
+#include "output.h"
+#include "fc.h"
 
-#define VERSION 0
-#define ID "FC"
-#define SUFFIX ".fc"
-#define ENOFILE 1
-#define EMKFILE 2
-#define ERDFILE 3
-#define EWRFILE 4
-#define EPASS 5
-
-typedef struct header {
-	char id[2];
-	uint16_t version;
-	uint32_t reserved; // alignment, reserved for future use
-	uint8_t salt[AES_BLOCKLEN];
-	uint64_t size;
-	uint8_t sum[AES_BLOCKLEN]; // encrypted sum of fields above
-} header;
-
-#define min(a, b) (a) < (b) ? (a) : (b)
+#define STDIN "_stdin_"
 
 // ./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz
 // https://en.wikipedia.org/wiki/Crypt_(C)
 const char b64[] = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
-#define PASS_MAX 64
-
-typedef struct progress {
-	int first;
-	void (*progress)(struct progress *c, float p);
-	void (*done)(struct progress *c);
-} progress;
-
-typedef struct ctx {
-	FILE *f;
-	char *name;
-	char *out;
-	char salt[AES_BLOCKLEN];
-	struct AES_ctx *ctx;
-	uint8_t key[AES_BLOCKLEN];
-	int enc;
-	char buf[sizeof(header)];
-	int buf_pos;
-	size_t buf_len;
-	char password[PASS_MAX];
-	progress progress;
-	size_t size;
-} ctx;
-
-// forward declaration
+// forward declarations
 static int ri64(char c);
 static void r64(unsigned char *p, int pn, unsigned char* r, int rn);
 static void rr64(unsigned char *p, int pn, unsigned char *k, int kn);
@@ -87,29 +50,9 @@ static void *malloc_e(size_t n);
 static int _feof(ctx *c);
 static int next_block(ctx *c, char *b, int pad);
 static int do_filep(ctx *c, FILE *fp, char *file);
-
-
-// TODO:
-// 1. use thread pool for bulk work
-// 2. better progress info output
-//static int get_cur_pos(int *x, int *y) {
-//	*x = -1;
-//	*y = -1;
-//	struct termios term, restore;
-//
-//	tcgetattr(0, &term);
-//	tcgetattr(0, &restore);
-//	term.c_lflag &= ~(ICANON | ECHO);
-//	tcsetattr(0, TCSANOW, &term);
-//
-//	fwrite("\033[6n", 1, 4, stdout);
-//
-//	fscanf(stdin, "\033[%d;%dR", &y, &x);
-//
-//	tcsetattr(0, TCSANOW, &restore);
-//	return 0;
-//}
-
+static void add_work(ctx *c, char *file, FILE *filep);
+static int do_crypt(void *d);
+static void handle_file(ctx *ctx, char* file);
 
 static void r64(unsigned char *p, int pn, unsigned char* r, int rn) {
 	assert(pn / 3 * 4 == rn);
@@ -155,9 +98,11 @@ static void usage() {
 	fprintf(stdout, "Usage:\n"
 			"	fc [options] <file> ...\n"
 			"	-h show this help message\n"
-			"	-o specifies output file, only makes sense for single file\n"
+			"	-o specifies output file, only makes sense for encrypting/decrypting a single file\n"
 			"	-e encrypt\n"
 			"	-d decrypt\n"
+			"	-r remove the original file after encrypting/decrypting it, original file is kept if this option is not present\n"
+			"	-p <password>, if not present, user will be prompted to input password\n"
 			"	in case of no option, perform decryption if the file was an encrypted file, otherwise encrypt\n"
 	);
 	exit(2);
@@ -184,29 +129,51 @@ static int read_file(FILE *f, char *name, char *b, size_t n) {
 	int r = fread(b, 1, n, f);
 	if (ferror(f)) {
 		fprintf(stderr, "error reading file: %s\n", name);
+		fflush(stderr);
 		exit(ERDFILE);
 	}
 	return r;
 }
 
 
+static void pad_block(char *b, int n) {
+	char d = (char)(AES_BLOCKLEN - n);
+	for (int i = n; i < AES_BLOCKLEN; i++) {
+		b[i] = d;
+	}
+}
+
 static int next_block(ctx *c, char *b, int pad) {
-	int n = -2;
-	while (1) {
-		if (ferror(c->f)) {
-			return -1;
-		}
-		if (n > 0 || _feof(c)) {
-			break;
-		}
+	long x = (long)c->x;
+	if (x == 1) { // last block was returned
+		return -1;
+	}
+	if (ferror(c->f)) {
+		return -2;
+	}
+	int n = 0;
+	if (!_feof(c)) {
 		n = read_from_ctx(c, b, AES_BLOCKLEN);
 	}
+
+//	int n = -2;
+//	while (1) {
+//		if (ferror(c->f)) {
+//			return -1;
+//		}
+//		if (n > 0 || _feof(c)) {
+//			break;
+//		}
+//		n = read_from_ctx(c, b, AES_BLOCKLEN);
+//	}
 	if (pad && n >= 0 && n < AES_BLOCKLEN) { // pad
-		char d = (char)(AES_BLOCKLEN - n);
-		for (int i = n; i < AES_BLOCKLEN; i++) {
-			b[i] = d;
-		}
+		pad_block(b, n);
+//		char d = (char)(AES_BLOCKLEN - n);
+//		for (int i = n; i < AES_BLOCKLEN; i++) {
+//			b[i] = d;
+//		}
 		n = AES_BLOCKLEN;
+		c->x = (void *)1;
 	}
 	return n;
 
@@ -215,6 +182,7 @@ static int next_block(ctx *c, char *b, int pad) {
 static void _write(char *b, size_t n, FILE *f, char *name) {
 	if (fwrite(b, 1, n, f) < n) {
 		fprintf(stderr, "errir writting file: %s\n", name);
+		fflush(stderr);
 		exit(EWRFILE);
 	}
 }
@@ -222,11 +190,13 @@ static void _write(char *b, size_t n, FILE *f, char *name) {
 static FILE *create_file(char *name) {
 	if (!access(name, F_OK)) {
 		fprintf(stderr, "file already exists: %s\n", name);
+		fflush(stderr);
 		exit(EMKFILE);
 	}
 	FILE *f = fopen(name, "w+");
 	if (!f) {
 		fprintf(stderr, "error creating file: %s\n", name);
+		fflush(stderr);
 		exit(EMKFILE);
 	}
 	return f;
@@ -264,6 +234,7 @@ static void *malloc_e(size_t n) {
 	void *p = malloc(n);
 	if (!p) {
 		fprintf(stderr, "out of memory");
+		fflush(stderr);
 		exit(33);
 	}
 	return p;
@@ -292,6 +263,7 @@ static void encrypt(ctx *c) {
 	_write((char *)&h, sizeof(h), fout, name);
 	int n = 0;
 	float progress = 0;
+	c->x = (void *)0;
 	while ((r = next_block(c, b, 1) > 0)) {
 		AES_CBC_encrypt_buffer(c->ctx, (uint8_t *)b, r);
 		_write(b, AES_BLOCKLEN, fout, name);
@@ -305,6 +277,7 @@ static void encrypt(ctx *c) {
 	if (r == -1) {
 		// error
 		fprintf(stderr, "errir reading file: %s\n", c->name);
+		fflush(stderr);
 		exit(EWRFILE);
 	}
 	h.size = n;
@@ -314,6 +287,10 @@ static void encrypt(ctx *c) {
 	// write header again with size and sum
 	_write((char *)&h, sizeof(h), fout, name);
 	fclose(fout);
+
+	if (c->remove_origin && strncmp(STDIN, c->name, sizeof(STDIN))) {
+		remove(c->name);
+	}
 
 	if (c->progress.done) {
 		c->progress.done(&c->progress);
@@ -325,16 +302,18 @@ static void encrypt(ctx *c) {
 
 static void init_AESctx(ctx *c) {
 	if (c->enc) {
-		char *rd = "/dev/random";
+		char *rd = "/dev/urandom";
 		FILE *fp = fopen(rd, "r");
 		if (!fp) {
 			fprintf(stderr, "error opening %s\n", rd);
+			fflush(stderr);
 			exit(ENOFILE);
 		}
 		char b[12];
 		size_t n = read_file(fp, rd, b, sizeof(b));
 		if (n != sizeof(b)) {
-			fprintf(stderr, "error reading /dev/random\n");
+			fprintf(stderr, "error reading /dev/urandom\n");
+			fflush(stderr);
 			exit(ERDFILE);
 		}
 		fclose(fp);
@@ -347,9 +326,12 @@ static void init_AESctx(ctx *c) {
 	salt[sizeof(c->salt) + 3] = '\0';
 
 	errno = 0; // clear error
-	char *h = crypt(c->password, salt);
+	struct crypt_data cd;
+	memset(&cd, 0, sizeof(cd));
+	char *h = crypt_r(c->password, salt, &cd);;
 	if (errno) {
 		fprintf(stderr, "error encrypting password\n");
+		fflush(stderr);
 		exit(errno);
 	}
 
@@ -360,6 +342,7 @@ static void init_AESctx(ctx *c) {
 	struct AES_ctx *ctx = malloc(sizeof(*ctx));
 	if (!ctx) {
 		fprintf(stderr, "out of memory");
+		fflush(stderr);
 		exit(33);
 	}
 	AES_init_ctx_iv(ctx, (uint8_t *)key, (uint8_t *)c->salt);
@@ -395,6 +378,7 @@ static void decrypt(ctx *c) {
 	header *h = (header *)c->buf;
 	if (!check_sum(h, c)) {
 		fprintf(stderr, "decryption failed, password not correct\n");
+		fflush(stderr);
 		exit(77);
 	}
 	char *name = c->out;
@@ -418,6 +402,7 @@ static void decrypt(ctx *c) {
 	char last[AES_BLOCKLEN];
 	int first = 1;
 	size_t l = 0;
+	c->x = (void *)0;
 	while ((r = next_block(c, b, 0) > 0)) {
 		AES_CBC_decrypt_buffer(c->ctx, (uint8_t*) b, r);
 		if (first) {
@@ -434,6 +419,7 @@ static void decrypt(ctx *c) {
 	if (r == -1) {
 		// error
 		fprintf(stderr, "errir reading file: %s\n", c->name);
+		fflush(stderr);
 		exit(EWRFILE);
 	}
 	// remove padding
@@ -443,6 +429,11 @@ static void decrypt(ctx *c) {
 
 
 	fclose(fout);
+
+	if (c->remove_origin && strncmp(STDIN, c->name, sizeof(STDIN))) {
+		remove(c->name);
+	}
+
 	if (c->progress.done) {
 		c->progress.done(&c->progress);
 	}
@@ -457,6 +448,7 @@ void fcrypt(ctx *c) {
 	if (n < sizeof(header) || strncmp(ID, h->id, sizeof(h->id))) { // not an encrypted file, to encrypt
 		if (!c->enc) { // decrypt
 			fprintf(stderr, "error reading header, unable to decrypt: %s", c->name);
+			fflush(stderr);
 			exit(11);
 		}
 		// otherwise encrypt
@@ -485,7 +477,7 @@ void fcrypt(ctx *c) {
 
 static void get_pass(ctx *c) {
 	static int pass_read = 0;
-	if (pass_read) {
+	if (pass_read || c->password[0] != '\0') {
 		return;
 	}
 	char *p = getpass("password:");
@@ -499,7 +491,7 @@ int main(int argc, char **argv) {
 	memset(&ctx, 0, sizeof(ctx));
 	ctx.enc = -1; // check the file header to determine whether to encrypt or decrypt
 	int c;
-	while ((c = getopt(argc, argv, "hedo:")) != -1) {
+	while ((c = getopt(argc, argv, "hedrp:o:")) != -1) {
 		switch (c) {
 		case 'h':
 			usage();
@@ -510,8 +502,14 @@ int main(int argc, char **argv) {
 		case 'd': // decrypt
 			ctx.enc = 0;
 			break;
+		case 'r':
+			ctx.remove_origin = 1;
+			break;
 		case 'o':
 			ctx.out = optarg;
+			break;
+		case 'p':
+			memcpy(ctx.password, optarg, sizeof(ctx.password));
 			break;
 		case '?':
 			if (optopt == 'o')
@@ -526,34 +524,25 @@ int main(int argc, char **argv) {
 		}
 	}
 
+	ctx.wp = init_work_pool();
+	ctx.om = init_out_man();
+
 	if (optind < argc) {
 		for (int i = optind; i < argc; i++) {
 			char *fn = argv[i];
-			if (!access(fn, F_OK)) {
-				struct stat st;
-				if (stat(fn, &st) == -1) {
-					fprintf(stderr, "unable to stat file: %s\n", fn);
-					return 255;
-				}
-				if (S_ISREG(st.st_mode)) {
-					get_pass(&ctx);
-					do_file(&ctx, fn);
-				} else if (S_ISDIR(st.st_mode)) {
-					get_pass(&ctx);
-					do_dir(&ctx, fn);
-				}
-			} else {
-				fprintf(stderr, "file %s doesn't exist\n", argv[1]);
-			}
+			handle_file(&ctx, fn);
 		}
 	} else {
 		// stdin
 		f = stdin;
-		ctx.name = "_stdin_";
-		ctx.out = "_stdin_.fc";
-		get_pass(&ctx);
-		do_filep(&ctx, f, ctx.name);
+		ctx.name = STDIN;
+		ctx.out = STDIN ".fc";
+		add_work(&ctx, ctx.name, f);
 	}
+	// finished scanning
+	no_more_work(ctx.wp);
+	wait_until_done(ctx.wp);
+	destroy_out_man(ctx.om);
 }
 
 static void progress_out(progress *prog, float p) {
@@ -562,56 +551,127 @@ static void progress_out(progress *prog, float p) {
 	}
 	char b[4];
 	sprintf(b, "%d", (int)(p * 100));
-	if (prog->first) {
-		prog->first = 0;
-		ctx *c = (ctx *)((uint64_t)(prog) - offsetof(ctx, progress));
-		fprintf(stdout, "%s: %3.3s%%", c->name, b);
-		fflush(stdout);
-	} else {
-		fprintf(stdout, "\b\b\b\b%3.3s%%", b);
-		fflush(stdout);
-	}
+	ctx *c = (ctx *)((uint64_t)(prog) - offsetof(ctx, progress));
+	output(c->output, "%s: %3.3s%%", c->name, b);
+//	if (prog->first) {
+//		prog->first = 0;
+////		fprintf(stdout, "%s: %3.3s%%", c->name, b);
+////		fflush(stdout);
+//	} else {
+//		fprintf(stdout, "\b\b\b\b%3.3s%%", b);
+//		fflush(stdout);
+//	}
 }
 
 static void progress_done(progress *prog) {
-	fprintf(stdout, "\n");
+	ctx *c = (ctx *)((uint64_t)(prog) - offsetof(ctx, progress));
+	output(c->output, "%s: 100%%", c->name);
 }
 
 static int do_filep(ctx *c, FILE *fp, char *file) {
+	c->output = alloc_out(c->om);
 	// new context for each file
-	ctx cn;
-	memcpy(&cn, c, sizeof(cn));
-	cn.f = fp;
-	cn.name = file;
+	//ctx cn;
+	//memcpy(&cn, c, sizeof(cn));
+	c->f = fp;
+	c->name = file;
 
 	// set size
 	int fd = fileno(fp);
 	if (fd == -1) {
 		fprintf(stderr, "error fileno\n");
+		fflush(stderr);
 		exit(EXIT_FAILURE);
 	}
 	struct stat st;
 	if (fstat(fd, &st) == -1) {
 		fprintf(stderr, "error stat file\n");
+		fflush(stderr);
 		exit(EXIT_FAILURE);
 	}
-	cn.size = st.st_size;
-	cn.progress.first = 1;
-	cn.progress.progress = progress_out;
-	cn.progress.done = progress_done;
-	fcrypt(&cn);
+	c->size = st.st_size;
+	c->progress.progress = progress_out;
+	c->progress.done = progress_done;
+	fcrypt(c);
+	output_done(c->output);
 	return 0;
+}
+
+static ctx *dup_ctx(ctx *c) {
+	ctx *ctx = malloc(sizeof(*ctx));
+	if (!ctx) {
+		exit(ENOMEM);
+	}
+	*ctx = *c;
+	return ctx;
+}
+
+static char *dup_str(char *s) {
+	if (!s) {
+		return NULL;
+	}
+	char *r = malloc(strlen(s) + 1);
+	if (!r) {
+		exit(ENOMEM);
+	}
+	strcpy(r, s);
+	return r;
+}
+
+static void add_work(ctx *c, char *file, FILE *filep) {
+	get_pass(c);
+	ctx *ctx = dup_ctx(c);
+	cryptwork *cw = malloc(sizeof(*cw));
+	memset(cw, 0, sizeof(*cw));
+	if (!cw) {
+		exit(ENOMEM);
+	}
+	cw->c = ctx;
+	cw->file = dup_str(file);
+	cw->extra = filep;
+	new_work(ctx->wp, cw, do_crypt);
+}
+
+static int do_crypt(void *d) {
+	cryptwork *w = (cryptwork *)d;
+	int r;
+	if (w->extra) {
+		r = do_filep(w->c, (FILE*)w->extra, w->file);
+	} else {
+		r = do_file(w->c, w->file);
+	}
+	free(w->file);
+	free(w->c);
+	free(w);
+	return r;
 }
 
 static int do_file(ctx *c, char *file) {
 	FILE *f = fopen(file, "r");
 	if (!f) {
-		fprintf(stderr, "unable to open file: %s\n", file);
+		oob_out(c->om, "unable to open file: %s", file);
 		return 1;
 	}
 	int r = do_filep(c, f, file);
 	fclose(f);
 	return r;
+}
+
+static void handle_file(ctx *ctx, char* file) {
+	if (!access(file, F_OK)) {
+		struct stat st;
+		if (stat(file, &st) == -1) {
+			oob_out(ctx->om, "unable to stat file: %s", file);
+			return;
+		}
+		if (S_ISREG(st.st_mode)) {
+			add_work(ctx, file, NULL);
+		} else if (S_ISDIR(st.st_mode)) {
+			do_dir(ctx, file);
+		}
+	} else {
+		oob_out(ctx->om, "unable to access file %s", file);
+	}
 }
 
 static int do_dir(ctx *ctx, char *dir) {
@@ -620,7 +680,7 @@ static int do_dir(ctx *ctx, char *dir) {
 	DIR *d;
 
 	if ((d = opendir(dir)) == NULL) {
-		fprintf(stderr, "Can't open %s\n", dir);
+		oob_out(ctx->om, "Can't open %s", dir);
 		return 1;
 	}
 
@@ -629,20 +689,8 @@ static int do_dir(ctx *ctx, char *dir) {
 		if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) {
 			continue;
 		}
-		struct stat st;
 		sprintf(path, "%s/%s", dir, e->d_name);
-		if (stat(path, &st) == -1) {
-			fprintf(stderr, "Unable to stat file: %s\n", path);
-			continue;
-		}
-		if (S_ISREG(st.st_mode)) {
-			do_file(ctx, path);
-		} else if (S_ISDIR(st.st_mode)) {
-			do_dir(ctx, path);
-		} else {
-			fprintf(stderr, "not a file or directory: %s\n", path);
-		}
-
+		handle_file(ctx, path);
 	}
 	return 0;
 }

@@ -1,15 +1,25 @@
 cc = gcc
 ld = gcc
 cflags = -g -Wall
-objects := $(patsubst %.c,%.o,$(wildcard *.c))
-fc: $(objects)
+srcdir = src
+builddir = build
+objects := $(patsubst $(srcdir)/%.c,$(builddir)/%.o,$(wildcard $(srcdir)/*.c))
+
+all: $(builddir)/fc
+
+$(builddir)/fc: $(objects)
 	$(ld) -o $@ $(objects) -lcrypt
 
-$(objects): %.o: %.c
+$(objects): $(builddir)/%.o: $(srcdir)/%.c
+	mkdir -p $(builddir)
 	$(cc) -c $(cflags) $< -o $@
 
 clean:
-	rm *.o fc
+	rm -rf $(builddir)
+
+test: $(builddir)/fc
+	chmod +x test/fc_test.sh
+	test/fc_test.sh
 	
-.PHONY: clean
+.PHONY: all clean test
 
