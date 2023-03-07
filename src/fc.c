@@ -42,7 +42,7 @@ static void encrypt_sum(header *h, ctx *ctx, uint8_t *sum);
 static int check_sum(header *h, ctx *ctx);
 static uint32_t decrypt_sum(header *h, ctx *ctx);
 static void _write(char *b, size_t n, FILE *f, char *name);
-static FILE *create_file(char *name);
+static FILE *create_file(ctx *c, char *name);
 static void encrypt(ctx *c);
 static int do_dir(ctx *ctx, char *dir);
 static int do_file(ctx *ctx, char *file);
@@ -187,17 +187,14 @@ static void _write(char *b, size_t n, FILE *f, char *name) {
 	}
 }
 
-static FILE *create_file(char *name) {
+static FILE *create_file(ctx *c, char *name) {
 	if (!access(name, F_OK)) {
-		fprintf(stderr, "file already exists: %s\n", name);
-		fflush(stderr);
-		exit(EMKFILE);
+		output(c->output, "file already exists: %s\n", name);
+		return NULL;
 	}
 	FILE *f = fopen(name, "w+");
 	if (!f) {
-		fprintf(stderr, "error creating file: %s\n", name);
-		fflush(stderr);
-		exit(EMKFILE);
+		output(c->output, "error creating file: %s\n", name);
 	}
 	return f;
 }
@@ -252,7 +249,10 @@ static void encrypt(ctx *c) {
 		name[nl + sl] = '\0';
 		namealloc = 1;
 	}
-	FILE *fout = create_file(name);
+	FILE *fout = create_file(c, name);
+	if (!fout) {
+		goto out;
+	}
 	char b[AES_BLOCKLEN];
 	int r;
 	header h;
@@ -295,6 +295,8 @@ static void encrypt(ctx *c) {
 	if (c->progress.done) {
 		c->progress.done(&c->progress);
 	}
+
+out:
 	if (namealloc) {
 		free(name);
 	}
@@ -396,7 +398,10 @@ static void decrypt(ctx *c) {
 		}
 		namealloc = 1;
 	}
-	FILE *fout = create_file(name);
+	FILE *fout = create_file(c, name);
+	if (!fout) {
+		goto out;
+	}
 	char b[AES_BLOCKLEN];
 	int r;
 	char last[AES_BLOCKLEN];
@@ -437,6 +442,8 @@ static void decrypt(ctx *c) {
 	if (c->progress.done) {
 		c->progress.done(&c->progress);
 	}
+
+out:
 	if (namealloc) {
 		free(name);
 	}
