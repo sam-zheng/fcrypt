@@ -62,13 +62,6 @@ void wait_until_done(work_pool *pool) {
 static void enqueue_work(work_pool *pool, work *w) {
 	pthread_mutex_lock(&pool->mutex);
 	list_add(&w->link, &pool->wh);
-//
-//	w->link.prev = pool->wh.prev;
-//	if (w->link.prev) {
-//		w->link.prev->next = &w->link;
-//	}
-//	w->link.next = &pool->wh;
-//	pool->wh.prev = &w->link;
 	pthread_mutex_unlock(&pool->mutex);
 
 	wakeup_one(pool);
@@ -89,12 +82,6 @@ static work *dequeue_work(work_pool *pool) {
 		return NULL;
 	}
 	work *w = (work *)list_remove(pool->wh.next);
-//
-//	work *w = (work *)pool->wh.next;
-//	pool->wh.next = w->link.next;
-//	if (pool->wh.next) {
-//		pool->wh.next->prev = &pool->wh;
-//	}
 	pthread_mutex_unlock(&pool->mutex);
 	return w;
 }

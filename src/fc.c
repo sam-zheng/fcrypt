@@ -341,12 +341,7 @@ static void init_AESctx(ctx *c) {
 	char key[18]; // only 16 bytes needed, next multiple of 3 is 18
 	rr64((unsigned char *)a, 24, (unsigned char *)key, sizeof(key));
 	memcpy(c->key, key, sizeof(c->key));
-	struct AES_ctx *ctx = malloc(sizeof(*ctx));
-	if (!ctx) {
-		fprintf(stderr, "out of memory");
-		fflush(stderr);
-		exit(33);
-	}
+	struct AES_ctx *ctx = malloc_e(sizeof(*ctx));
 	AES_init_ctx_iv(ctx, (uint8_t *)key, (uint8_t *)c->salt);
 	c->ctx = ctx;
 }
@@ -605,10 +600,7 @@ static int do_filep(ctx *c, FILE *fp, char *file) {
 }
 
 static ctx *dup_ctx(ctx *c) {
-	ctx *ctx = malloc(sizeof(*ctx));
-	if (!ctx) {
-		exit(ENOMEM);
-	}
+	ctx *ctx = malloc_e(sizeof(*ctx));
 	*ctx = *c;
 	return ctx;
 }
@@ -617,10 +609,7 @@ static char *dup_str(char *s) {
 	if (!s) {
 		return NULL;
 	}
-	char *r = malloc(strlen(s) + 1);
-	if (!r) {
-		exit(ENOMEM);
-	}
+	char *r = malloc_e(strlen(s) + 1);
 	strcpy(r, s);
 	return r;
 }
@@ -628,7 +617,7 @@ static char *dup_str(char *s) {
 static void add_work(ctx *c, char *file, FILE *filep) {
 	get_pass(c);
 	ctx *ctx = dup_ctx(c);
-	cryptwork *cw = malloc(sizeof(*cw));
+	cryptwork *cw = malloc_e(sizeof(*cw));
 	memset(cw, 0, sizeof(*cw));
 	if (!cw) {
 		exit(ENOMEM);
