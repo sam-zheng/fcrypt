@@ -24,7 +24,7 @@
 #include "aes.h"
 #include "work.h"
 #include "output.h"
-#include "fc.h"
+#include "fcrypt.h"
 
 #define STDIN "_stdin_"
 
@@ -530,12 +530,14 @@ int main(int argc, char **argv) {
 	ctx.om = init_out_man();
 
 	if (optind < argc) {
+		ctx.om->outf = stdout;
 		for (int i = optind; i < argc; i++) {
 			char *fn = argv[i];
 			handle_file(&ctx, fn);
 		}
 	} else {
 		// stdin
+		ctx.om->outf = NULL;
 		f = stdin;
 		ctx.name = STDIN;
 		ctx.out = STDIN ".fc";

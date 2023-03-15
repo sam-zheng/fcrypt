@@ -13,6 +13,7 @@ struct out_man {
 	int last_out_lines;
 	pthread_mutex_t mutex; // protect head
 	pthread_t thread;
+	FILE* outf;
 	int done __attribute__((aligned(4)));
 };
 

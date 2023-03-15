@@ -1,5 +1,5 @@
-#ifndef SRC_FC_H_
-#define SRC_FC_H_
+#ifndef SRC_FCRYPT_H_
+#define SRC_FCRYPT_H_
 
 #include "aes.h"
 #include "work.h"
@@ -61,4 +61,4 @@ typedef struct _work {
 
 void fcrypt(ctx *c);
 
-#endif /* SRC_FC_H_ */
+#endif /* SRC_FCRYPT_H_ */

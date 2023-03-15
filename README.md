@@ -10,7 +10,11 @@ to build:
 
 to use:
 
-	$ fc -h
+	$ fcrypt -h
+	
+to run test:
+
+	$ make test
 
 ### TODO
 

@@ -23,30 +23,29 @@ static int _out(struct out *o) {
 	if (!strlen(o->buf)) {
 		return 0;
 	}
-	int r = fprintf(stdout, "%s\n", o->buf);
-	fflush(stdout);
+	int r = fprintf(o->om->outf, "%s\n", o->buf);
+	fflush(o->om->outf);
 	return r;
 }
 
 static void clear(struct out_man *om) {
+
 	if (om->last_out_lines > 0) {
-		fprintf(stdout, "\033[%dA\033[%dM", om->last_out_lines, om->last_out_lines);
-//
-//		char *clr = malloc(om->last_out + 1);
-//		memset(clr, '\b', om->last_out);
-//		clr[om->last_out] = '\0';
-//		fprintf(stdout, clr);
-		fflush(stdout);
+		fprintf(om->outf, "\033[%dA\033[%dM", om->last_out_lines, om->last_out_lines);
+		fflush(om->outf);
 	}
 }
 
 static void __do_out(struct out_man *o, char *oob, va_list arg) {
+	if (!o->outf) {
+		return;
+	}
 	pthread_mutex_lock(&o->mutex);
 	clear(o);
 
 	// oob
 	if (oob) {
-		vfprintf(stdout, oob, arg);
+		vfprintf(o->outf, oob, arg);
 	}
 
 	list *e = NULL;
@@ -119,12 +118,12 @@ void destroy_out_man(struct out_man *om) {
 	om->done = 1;
 	pthread_join(om->thread, NULL);
 	list *e = NULL;
-	for_each(e, &om->head) {
+	for (e = om->head.next; e != &om->head; ) {
 		struct out *ot = LIST_OBJ(e, struct out, link);
-		if (ot) {
-			free(ot);
-		}
+		e = e->next;
+		free(ot);
 	}
+	free(om);
 }
 
 void oob_out(struct out_man *om, char* s,...) {
