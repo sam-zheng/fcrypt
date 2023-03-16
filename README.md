@@ -15,6 +15,19 @@ to use:
 to run test:
 
 	$ make test
+	
+### Example
+
+encrypt all files in the current directory:
+
+	$ fcrypt .
+	password:
+	./work.o: 100%
+	./output.o: 100%
+	./fcrypt.o: 100%
+	./crc.o: 100%
+	./aes.o: 100%
+	./fcrypt: 100%
 
 ### TODO
 

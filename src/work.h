@@ -3,11 +3,6 @@
 
 #include "list.h"
 
-//typedef struct head {
-//	struct head *prev;
-//	struct head *next;
-//} head;
-
 typedef struct work {
 	list link;
 	int (*func)(void *w);

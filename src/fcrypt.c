@@ -156,22 +156,8 @@ static int next_block(ctx *c, char *b, int pad) {
 		n = read_from_ctx(c, b, AES_BLOCKLEN);
 	}
 
-//	int n = -2;
-//	while (1) {
-//		if (ferror(c->f)) {
-//			return -1;
-//		}
-//		if (n > 0 || _feof(c)) {
-//			break;
-//		}
-//		n = read_from_ctx(c, b, AES_BLOCKLEN);
-//	}
 	if (pad && n >= 0 && n < AES_BLOCKLEN) { // pad
 		pad_block(b, n);
-//		char d = (char)(AES_BLOCKLEN - n);
-//		for (int i = n; i < AES_BLOCKLEN; i++) {
-//			b[i] = d;
-//		}
 		n = AES_BLOCKLEN;
 		c->x = (void *)1;
 	}
@@ -557,14 +543,6 @@ static void progress_out(progress *prog, float p) {
 	sprintf(b, "%d", (int)(p * 100));
 	ctx *c = (ctx *)((uint64_t)(prog) - offsetof(ctx, progress));
 	output(c->output, "%s: %3.3s%%", c->name, b);
-//	if (prog->first) {
-//		prog->first = 0;
-////		fprintf(stdout, "%s: %3.3s%%", c->name, b);
-////		fflush(stdout);
-//	} else {
-//		fprintf(stdout, "\b\b\b\b%3.3s%%", b);
-//		fflush(stdout);
-//	}
 }
 
 static void progress_done(progress *prog) {
@@ -574,9 +552,6 @@ static void progress_done(progress *prog) {
 
 static int do_filep(ctx *c, FILE *fp, char *file) {
 	c->output = alloc_out(c->om);
-	// new context for each file
-	//ctx cn;
-	//memcpy(&cn, c, sizeof(cn));
 	c->f = fp;
 	c->name = file;
 
