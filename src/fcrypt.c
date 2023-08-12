@@ -19,12 +19,14 @@
 #include <termios.h>
 #include <linux/futex.h>
 #include <sys/time.h>
+#include <dlfcn.h>
 
 #include "crc.h"
 #include "aes.h"
 #include "work.h"
 #include "output.h"
 #include "fcrypt.h"
+
 
 #define STDIN "_stdin_"
 
@@ -224,6 +226,8 @@ static void *malloc_e(size_t n) {
 }
 
 static void encrypt(ctx *c) {
+	void *ctx = c->cipher.ctx_new();
+	c->cipher.enc.init(ctx, c->cipher.cipher?c->cipher.cipher():NULL, c->key, c->salt);
 	char *name = c->out;
 	int namealloc = 0;
 	if (!name) {
@@ -250,9 +254,11 @@ static void encrypt(ctx *c) {
 	int n = 0;
 	float progress = 0;
 	c->x = (void *)0;
+	unsigned char buf[AES_BLOCKLEN];
+	int outl;
 	while ((r = next_block(c, b, 1) > 0)) {
-		AES_CBC_encrypt_buffer(c->ctx, (uint8_t *)b, r);
-		_write(b, AES_BLOCKLEN, fout, name);
+		c->cipher.enc.update(ctx, buf, &outl, b, sizeof(b));
+		_write(buf, AES_BLOCKLEN, fout, name);
 		n+=AES_BLOCKLEN;
 		progress = n / (float)c->size;
 		if (c->progress.progress) {
@@ -265,6 +271,11 @@ static void encrypt(ctx *c) {
 		fprintf(stderr, "errir reading file: %s\n", c->name);
 		fflush(stderr);
 		exit(EWRFILE);
+	}
+	if (c->cipher.enc.final) {
+		if (c->cipher.enc.final(ctx, buf, &outl) && outl > 0) {
+			_write(buf, outl, fout, name);
+		}
 	}
 	h.size = n;
 	encrypt_sum(&h, c, h.sum);
@@ -286,6 +297,7 @@ out:
 	if (namealloc) {
 		free(name);
 	}
+	c->cipher.ctx_free(ctx);
 }
 
 static void init_AESctx(ctx *c) {
@@ -323,19 +335,18 @@ static void init_AESctx(ctx *c) {
 		exit(errno);
 	}
 
-	char *a = h + 20;
+	char *a = h + sizeof(salt);
 	char key[18]; // only 16 bytes needed, next multiple of 3 is 18
 	rr64((unsigned char *)a, 24, (unsigned char *)key, sizeof(key));
 	memcpy(c->key, key, sizeof(c->key));
-	struct AES_ctx *ctx = malloc_e(sizeof(*ctx));
-	AES_init_ctx_iv(ctx, (uint8_t *)key, (uint8_t *)c->salt);
-	c->ctx = ctx;
+	c->cipher = aes();
+//	struct AES_ctx *ctx = malloc_e(sizeof(*ctx));
+//	AES_init_ctx_iv(ctx, (uint8_t *)key, (uint8_t *)c->salt);
+//	c->ctx = ctx;
 }
 
 static void uninit_AESctx(ctx *c) {
-	if (c->ctx) {
-		free(c->ctx);
-	}
+
 }
 
 static int _feof(ctx *c) {
@@ -357,6 +368,8 @@ static int end_with(char *s, char *suffix) {
 }
 
 static void decrypt(ctx *c) {
+	void *ctx = c->cipher.ctx_new();
+	c->cipher.dec.init(ctx, c->cipher.cipher ? c->cipher.cipher(): NULL, c->key, c->salt);
 	// in this case, header is already in c->buf
 	header *h = (header *)c->buf;
 	if (!check_sum(h, c)) {
@@ -389,14 +402,16 @@ static void decrypt(ctx *c) {
 	int first = 1;
 	size_t l = 0;
 	c->x = (void *)0;
+	unsigned char buf[AES_BLOCKLEN];
+	int outl;
 	while ((r = next_block(c, b, 0) > 0)) {
-		AES_CBC_decrypt_buffer(c->ctx, (uint8_t*) b, r);
+		c->cipher.dec.update(ctx, buf, &outl, b, sizeof(b));
 		if (first) {
 			first = 0;
 		} else {
 			_write(last, AES_BLOCKLEN, fout, name);
 		}
-		memcpy(last, b, sizeof(b));
+		memcpy(last, buf, sizeof(buf));
 		l += AES_BLOCKLEN;
 		if (c->progress.progress) {
 			c->progress.progress(&c->progress, l / (float)c->size);
@@ -407,6 +422,12 @@ static void decrypt(ctx *c) {
 		fprintf(stderr, "errir reading file: %s\n", c->name);
 		fflush(stderr);
 		exit(EWRFILE);
+	}
+	if (c->cipher.enc.final) {
+		if (c->cipher.enc.final(ctx, buf, &outl) && outl > 0) {
+			_write(last, AES_BLOCKLEN, fout, name);
+			memcpy(last, buf, outl);
+		}
 	}
 	// remove padding
 	if (last[sizeof(last) - 1] < AES_BLOCKLEN) {
@@ -428,6 +449,7 @@ out:
 	if (namealloc) {
 		free(name);
 	}
+	c->cipher.ctx_free(ctx);
 }
 
 void fcrypt(ctx *c) {

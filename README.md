@@ -1,6 +1,6 @@
 # Simple file encryption utility
 
-fcrypt is a simple file encryption utility based on [tiny-AES-c](https://github.com/kokke/tiny-AES-c)
+fcrypt is a simple file encryption utility using openssl crypto lib or [tiny-AES-c](https://github.com/kokke/tiny-AES-c)
 
 ### Usage
 
@@ -31,5 +31,5 @@ encrypt all files in the current directory:
 
 ### TODO
 
-performance needs to be improved.
+tidy up.
 
