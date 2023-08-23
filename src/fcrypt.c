@@ -30,6 +30,8 @@
 
 #define STDIN "_stdin_"
 
+#define PROGRESS_BLK (2 << 20)
+
 // ./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz
 // https://en.wikipedia.org/wiki/Crypt_(C)
 const char b64[] = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
@@ -252,17 +254,18 @@ static void encrypt(ctx *c) {
 
 	_write((char *)&h, sizeof(h), fout, name);
 	int n = 0;
-	float progress = 0;
 	c->x = (void *)0;
 	unsigned char buf[AES_BLOCKLEN];
 	int outl;
+	int step = 0;
 	while ((r = next_block(c, b, 1) > 0)) {
 		c->cipher->enc.update(ctx, buf, &outl, b, sizeof(b));
 		_write(buf, AES_BLOCKLEN, fout, name);
 		n+=AES_BLOCKLEN;
-		progress = n / (float)c->size;
-		if (c->progress.progress) {
-			c->progress.progress(&c->progress, progress);
+		int s = n / PROGRESS_BLK;
+		if (c->progress.progress && s > step) {
+			c->progress.progress(&c->progress, n / (float)c->size);
+			step = s;
 		}
 	}
 
@@ -404,6 +407,7 @@ static void decrypt(ctx *c) {
 	c->x = (void *)0;
 	unsigned char buf[AES_BLOCKLEN];
 	int outl;
+	int step = 0;
 	while ((r = next_block(c, b, 0) > 0)) {
 		c->cipher->dec.update(ctx, buf, &outl, b, sizeof(b));
 		if (first) {
@@ -413,8 +417,10 @@ static void decrypt(ctx *c) {
 		}
 		memcpy(last, buf, sizeof(buf));
 		l += AES_BLOCKLEN;
-		if (c->progress.progress) {
+		int s = l / PROGRESS_BLK;
+		if (c->progress.progress && s > step) {
 			c->progress.progress(&c->progress, l / (float)c->size);
+			step = s;
 		}
 	}
 	if (r == -1) {
