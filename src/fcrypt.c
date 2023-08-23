@@ -226,8 +226,8 @@ static void *malloc_e(size_t n) {
 }
 
 static void encrypt(ctx *c) {
-	void *ctx = c->cipher.ctx_new();
-	c->cipher.enc.init(ctx, c->cipher.cipher?c->cipher.cipher():NULL, c->key, c->salt);
+	void *ctx = c->cipher->ctx_new();
+	c->cipher->enc.init(ctx, c->cipher->cipher?c->cipher->cipher():NULL, c->key, c->salt);
 	char *name = c->out;
 	int namealloc = 0;
 	if (!name) {
@@ -257,7 +257,7 @@ static void encrypt(ctx *c) {
 	unsigned char buf[AES_BLOCKLEN];
 	int outl;
 	while ((r = next_block(c, b, 1) > 0)) {
-		c->cipher.enc.update(ctx, buf, &outl, b, sizeof(b));
+		c->cipher->enc.update(ctx, buf, &outl, b, sizeof(b));
 		_write(buf, AES_BLOCKLEN, fout, name);
 		n+=AES_BLOCKLEN;
 		progress = n / (float)c->size;
@@ -272,8 +272,8 @@ static void encrypt(ctx *c) {
 		fflush(stderr);
 		exit(EWRFILE);
 	}
-	if (c->cipher.enc.final) {
-		if (c->cipher.enc.final(ctx, buf, &outl) && outl > 0) {
+	if (c->cipher->enc.final) {
+		if (c->cipher->enc.final(ctx, buf, &outl) && outl > 0) {
 			_write(buf, outl, fout, name);
 		}
 	}
@@ -297,7 +297,7 @@ out:
 	if (namealloc) {
 		free(name);
 	}
-	c->cipher.ctx_free(ctx);
+	c->cipher->ctx_free(ctx);
 }
 
 static void init_AESctx(ctx *c) {
@@ -368,14 +368,14 @@ static int end_with(char *s, char *suffix) {
 }
 
 static void decrypt(ctx *c) {
-	void *ctx = c->cipher.ctx_new();
-	c->cipher.dec.init(ctx, c->cipher.cipher ? c->cipher.cipher(): NULL, c->key, c->salt);
+	void *ctx = c->cipher->ctx_new();
+	c->cipher->dec.init(ctx, c->cipher->cipher ? c->cipher->cipher(): NULL, c->key, c->salt);
 	// in this case, header is already in c->buf
 	header *h = (header *)c->buf;
 	if (!check_sum(h, c)) {
 		fprintf(stderr, "decryption failed, password not correct\n");
 		fflush(stderr);
-		exit(77);
+		return;
 	}
 	char *name = c->out;
 	int namealloc = 0;
@@ -405,7 +405,7 @@ static void decrypt(ctx *c) {
 	unsigned char buf[AES_BLOCKLEN];
 	int outl;
 	while ((r = next_block(c, b, 0) > 0)) {
-		c->cipher.dec.update(ctx, buf, &outl, b, sizeof(b));
+		c->cipher->dec.update(ctx, buf, &outl, b, sizeof(b));
 		if (first) {
 			first = 0;
 		} else {
@@ -423,8 +423,8 @@ static void decrypt(ctx *c) {
 		fflush(stderr);
 		exit(EWRFILE);
 	}
-	if (c->cipher.enc.final) {
-		if (c->cipher.enc.final(ctx, buf, &outl) && outl > 0) {
+	if (c->cipher->enc.final) {
+		if (c->cipher->enc.final(ctx, buf, &outl) && outl > 0) {
 			_write(last, AES_BLOCKLEN, fout, name);
 			memcpy(last, buf, outl);
 		}
@@ -449,7 +449,7 @@ out:
 	if (namealloc) {
 		free(name);
 	}
-	c->cipher.ctx_free(ctx);
+	c->cipher->ctx_free(ctx);
 }
 
 void fcrypt(ctx *c) {
@@ -534,6 +534,8 @@ int main(int argc, char **argv) {
 		}
 	}
 
+	crypto_init();
+
 	ctx.wp = init_work_pool();
 	ctx.om = init_out_man();
 
@@ -554,6 +556,7 @@ int main(int argc, char **argv) {
 	// finished scanning
 	no_more_work(ctx.wp);
 	wait_until_done(ctx.wp);
+	crypto_uninit();
 	destroy_out_man(ctx.om);
 }
 

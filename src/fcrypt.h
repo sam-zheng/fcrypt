@@ -62,7 +62,7 @@ typedef struct ctx {
 	char *name;
 	char *out;
 	char salt[AES_BLOCKLEN];
-	cipher cipher;
+	cipher *cipher;
 	uint8_t key[AES_BLOCKLEN];
 	int enc;
 	char buf[sizeof(header)];

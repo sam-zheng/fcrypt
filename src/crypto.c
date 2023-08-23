@@ -96,20 +96,26 @@ static int crypto_dec_init(void *ctx, const void *cipher, const unsigned char *k
 	return dinit(ctx, cipher, NULL, key, iv);
 }
 
-cipher aes() {
+static cipher *_cipher = (void *)0;
+
+void crypto_init() {
+	if (_cipher) {
+		return;
+	}
+	_cipher = malloc(sizeof(cipher));
+	memset(_cipher, 0, sizeof(*_cipher));
 	void *p = dlopen("libcrypto.so", RTLD_NOW | RTLD_LOCAL);
-	cipher c;
-	memset(&c, 0, sizeof(c));
 	if (!p) {
 		// no openssl, try tinyAES
-		c.ctx_new = aes_ctx_new;
-		c.ctx_free = aes_ctx_free;
-		c.enc.init = aes_init;
-		c.enc.update = aes_enc_update;
+		_cipher->ctx_new = aes_ctx_new;
+		_cipher->ctx_free = aes_ctx_free;
+		_cipher->enc.init = aes_init;
+		_cipher->enc.update = aes_enc_update;
 
-		c.dec.init = aes_init;
-		c.dec.update = aes_dec_update;
-		return c;
+		_cipher->dec.init = aes_init;
+		_cipher->dec.update = aes_dec_update;
+		_cipher->impl = (void *)0;
+		_cipher->type = TINYAES;
 	}
 
 
@@ -126,20 +132,29 @@ cipher aes() {
 	dupdate  = dlsym(p, "EVP_DecryptUpdate");
 	dfinal   = dlsym(p, "EVP_DecryptFinal_ex");
 
+	_cipher->ctx_new = ctx_new;
+	_cipher->ctx_free = ctx_free;
+	_cipher->cipher = cbc;
 
+	_cipher->enc.init = crypto_enc_init;
+	_cipher->enc.update = update;
+	_cipher->enc.final = final;
 
-	c.ctx_new = ctx_new;
-	c.ctx_free = ctx_free;
-	c.cipher = cbc;
+	_cipher->dec.init = crypto_dec_init;
+	_cipher->dec.update = dupdate;
+	_cipher->dec.final = dfinal;
+	_cipher->impl = p;
+	_cipher->type = CRYPTO;
+}
 
-	c.enc.init = crypto_enc_init;
-	c.enc.update = update;
-	c.enc.final = final;
+void crypto_uninit() {
+	if (_cipher && _cipher->type == CRYPTO && _cipher->impl) {
+		dlclose(_cipher->impl);
+	}
+}
 
-	c.dec.init = crypto_dec_init;
-	c.dec.update = dupdate;
-	c.dec.final = dfinal;
-	return c;
+cipher *aes() {
+	return _cipher;
 }
 
 
