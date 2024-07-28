@@ -116,6 +116,7 @@ void crypto_init() {
 		_cipher->dec.update = aes_dec_update;
 		_cipher->impl = (void *)0;
 		_cipher->type = TINYAES;
+		return;
 	}
 
 
